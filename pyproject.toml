@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "BeaverFlow"
+version = "0.1.0"
+description = "A minimal agent workflow framework with task/acceptance namespaces."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai>=1.0.0",
+]
+license = {text = "MIT"}
+keywords = ["agents", "workflow", "automation", "codex"]
+
+[tool.setuptools]
+py-modules = ["agent", "agent_workflow"]
+
+[project.scripts]
+beaverflow-agent = "agent:main"

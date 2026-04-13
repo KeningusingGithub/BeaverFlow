@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+id_rsa
+known_hosts
+ssh_info
+
+# BeaverFlow runtime state
+.agents/
+.workflow/
+demo_ws/
+sample2_ws/
+
+# Logs and editor noise
+*.log
+*.tmp
+.DS_Store
+.vscode/
+.idea/
