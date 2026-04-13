@@ -2,6 +2,8 @@
 ![BeaverFlow main image](BeaverIcon1.png)
 BeaverFlow is a minimal agent workflow framework with one defining feature:
 
+It is also very well-suited for quantitative finance research workflows.
+
 **it separates execution from acceptance, then composes multiple agents with a tiny workflow DSL.**
 
 In plain terms, BeaverFlow does two things on purpose:
