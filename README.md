@@ -1,5 +1,5 @@
 # BeaverFlow
-![BeaverFlow main image](assets/beaverflow-main.png)
+![BeaverFlow main image](BeaverIcon1.png)
 BeaverFlow is a minimal agent workflow framework built around two ideas:
 
 1. Each agent is defined as a small Python `Agent(...)` object.
