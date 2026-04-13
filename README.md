@@ -1,8 +1,6 @@
 # BeaverFlow
 ![BeaverFlow main image](BeaverIcon1.png)
-BeaverFlow is a minimal agent workflow framework with one defining feature:
-
-**it separates execution from acceptance, then composes multiple agents with a tiny workflow DSL.**
+BeaverFlow is a minimal agent workflow framework that makes research automate:
 
 In plain terms, BeaverFlow does two things on purpose:
 
