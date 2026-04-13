@@ -17,7 +17,6 @@ BeaverFlow/
   agent.py
   agent_workflow.py
   agent_workflow_sample.py
-  agent_workflow_sample2.py
   README.md
   LICENSE
   .gitignore
@@ -114,17 +113,6 @@ There is no retry primitive in the current design.
 ### `agent_workflow_sample.py`
 
 A small writer/checker demo. It bootstraps one toy spec file under `demo_ws` and shows the basic loop shape.
-
-### `agent_workflow_sample2.py`
-
-A task-only template for a two-agent idea-generation / idea-testing workflow:
-
-- Agent A appends new ideas to `idea_list`
-- Agent B tests exactly one not-yet-tested idea per run
-
-This sample intentionally does **not** contain counters, retry logic, or bootstrap helpers. Agent behavior is constrained only through `task` and `acceptance`.
-
-Before a real run, edit the workspace and remote path constants in `agent_workflow_sample2.py` and prepare the workspace files it expects.
 
 ## Notes about the current interface
 
