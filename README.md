@@ -1,35 +1,17 @@
 # BeaverFlow
 ![BeaverFlow main image](BeaverIcon1.png)
-BeaverFlow is a minimal agent workflow framework that makes research automate:
+BeaverFlow is a minimal agent workflow framework that makes research automate and systematic:
 
-In plain terms, BeaverFlow does two things on purpose:
+BeaverFlow does two things on purpose:
 
 1. It defines a practical AI ↔ Codex agent loop that can handle non-trivial engineering tasks while keeping `task` and `acceptance` as separate truths.
 2. It defines a lightweight multi-agent composition model (`A->B`, `A and B`, `loop(...)`) so workflows can be assembled like building blocks.
-
-The project is built around two ideas:
-
-1. Each agent is defined as a small Python `Agent(...)` object.
-2. Each agent runs inside its own namespace under one shared workspace.
 
 The core split is intentional:
 
 - `agent.py` runs one agent and enforces `task`, `acceptance`, and optional `mindset`.
 - `agent_workflow.py` composes multiple agents with a small workflow DSL such as `A->B`, `A and B`, and `loop(A->B, 3)`.
 
-## Repository layout
-
-```text
-BeaverFlow/
-  agent.py
-  agent_workflow.py
-  agent_workflow_sample.py
-  README.md
-  LICENSE
-  .gitignore
-  requirements.txt
-  pyproject.toml
-```
 
 ## What is stable in this repo
 
