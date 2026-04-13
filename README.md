@@ -97,6 +97,68 @@ python3 agent_workflow_sample.py
 
 It prints the commands that would be executed. To run it for real, set `DRY_RUN = False` in `agent_workflow_sample.py` and make sure your OpenAI and Codex environment is ready.
 
+## Setup (OpenAI API + Codex CLI)
+
+BeaverFlow needs both:
+
+1. `OPENAI_API_KEY`
+2. `codex` CLI in `PATH`
+
+### 1) Install Codex CLI
+
+```bash
+npm install -g @openai/codex
+codex --version
+which codex
+```
+
+### 2) Set API key
+
+```bash
+export OPENAI_API_KEY="your_api_key_here"
+echo "${OPENAI_API_KEY:+set}"
+```
+
+### 3) Install Python deps
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 4) Run
+
+Dry run:
+
+```bash
+python3 agent_workflow_sample.py
+```
+
+Real run:
+
+1. Set `DRY_RUN = False` in `agent_workflow_sample.py`
+2. Run again:
+
+```bash
+python3 agent_workflow_sample.py
+```
+
+Single agent:
+
+```bash
+python3 agent.py \
+  --workspace ./demo_ws \
+  --task "Implement feature X" \
+  --acceptance "All tests pass"
+```
+
+### Troubleshooting
+
+- `codex: command not found`: make sure npm global bin is in `PATH`.
+- OpenAI auth error: check `OPENAI_API_KEY`.
+- Only prints commands: `DRY_RUN` is still `True`.
+
 ## Workflow DSL
 
 Supported workflow expressions:
