@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
 import sys
+import time
+import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,15 +20,168 @@ DEFAULT_AI_MODEL = "gpt-5.4"
 DEFAULT_CODEX_MODEL = "gpt-5.3-codex"
 DEFAULT_CODEX_TIMEOUT_S = 1800
 DEFAULT_MAX_ROUNDS = 3
+MAX_AGENT_ID_LEN = 120
 
 
 class WorkflowSyntaxError(SyntaxError):
     pass
 
 
+# -------------------------
+# Small helpers
+# -------------------------
+
+def default_text(value: str | None, fallback: str) -> str:
+    text = "" if value is None else str(value).strip()
+    return text or fallback
+
+
+def sanitize_component(raw: str) -> str:
+    value = str(raw or "").strip()
+    value = value.replace("\\", "-").replace("/", "-")
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value)
+    value = re.sub(r"-{2,}", "-", value).strip(" ._-")
+    return value or "x"
+
+
+def normalize_agent_id(raw: str | None) -> str:
+    value = str(raw or "").strip()
+    value = value.replace("\\", "-").replace("/", "-")
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value)
+    value = re.sub(r"-{2,}", "-", value).strip(" ._-")
+    if not value:
+        raise ValueError("agent-id is empty after normalization")
+    return value[:MAX_AGENT_ID_LEN]
+
+
+def workflow_dir(workspace: Path) -> Path:
+    path = workspace / ".workflow"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def new_workflow_run_id() -> str:
+    return time.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
+
+
+def normalize_workflow_run_id(raw: str | None) -> str:
+    value = "" if raw is None else str(raw).strip()
+    if not value:
+        value = new_workflow_run_id()
+    value = value.replace("\\", "-").replace("/", "-")
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value)
+    value = re.sub(r"-{2,}", "-", value).strip(" ._-")
+    if not value:
+        value = new_workflow_run_id()
+    return value
+
+
+def workflow_run_dir(workspace: Path, workflow_run_id: str) -> Path:
+    path = workflow_dir(workspace) / "runs" / workflow_run_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def rendered_dir(workspace: Path, workflow_run_id: str) -> Path:
+    path = workflow_run_dir(workspace, workflow_run_id) / "rendered"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def channel_dir(workspace: Path, workflow_run_id: str, channel: str) -> Path:
+    path = workflow_run_dir(workspace, workflow_run_id) / "shared" / channel
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def branch_manifest_path(workspace: Path, workflow_run_id: str, channel: str) -> Path:
+    path = workflow_run_dir(workspace, workflow_run_id) / "branches" / f"{channel}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def safe_file_stem(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+
+
+def build_execution_agent_id(
+    workflow_run_id: str,
+    channel: str,
+    agent_name: str,
+    invocation_index: int,
+) -> str:
+    """
+    One workflow invocation -> one fresh agent_id.
+
+    This is the core correctness boundary:
+    - workflow controls *how many invocations* happen
+    - agent.py max_rounds controls *how many internal rounds* happen inside one invocation
+    - reset is no longer relied upon for correctness
+    """
+    workflow_run_id = sanitize_component(workflow_run_id)
+    channel = sanitize_component(channel)
+    agent_name = sanitize_component(agent_name)
+    suffix = f"call_{invocation_index:04d}"
+    raw = f"wf.{workflow_run_id}.{channel}.{agent_name}.{suffix}"
+    if len(raw) <= MAX_AGENT_ID_LEN:
+        return raw
+
+    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+    shortened = f"wf.{workflow_run_id[:32]}.{digest}.{suffix}"
+    return normalize_agent_id(shortened)
+
+
+def read_status(workspace: Path, agent_id: str) -> dict[str, Any]:
+    path = workspace / ".agents" / agent_id / "state" / "ACCEPTANCE_STATUS.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+
+def write_branch_manifest(
+    workspace: Path,
+    workflow_run_id: str,
+    channel: str,
+    left: str,
+    right: str,
+) -> None:
+    manifest = branch_manifest_path(workspace, workflow_run_id, channel)
+    manifest.write_text(
+        json.dumps(
+            {
+                "workflow_run_id": workflow_run_id,
+                "channel": channel,
+                "left_channel": left,
+                "right_channel": right,
+                "left_shared": str(channel_dir(workspace, workflow_run_id, left)),
+                "right_shared": str(channel_dir(workspace, workflow_run_id, right)),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+# -------------------------
+# Agent
+# -------------------------
+
 @dataclass(slots=True)
 class Agent:
-    """Required: name, script, workspace, task, acceptance. mindset is optional; omitted means use agent.py builtin default."""
+    """
+    Required: name, script, workspace, task, acceptance.
+    mindset is optional; omitted means use agent.py builtin default.
+
+    Notes:
+    - Each workflow invocation now gets a fresh agent_id.
+    - `reset` is kept only for compatibility / manual debugging. It is no longer
+      the mechanism that guarantees loop correctness.
+    """
+
     name: str
     script: str | Path
     workspace: str | Path
@@ -82,45 +239,76 @@ class Agent:
         self.workspace = Path(self.workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
 
-    def render(self, channel: str) -> tuple[str, str, str | None]:
-        shared = channel_dir(self.workspace, channel)
-        manifest = workflow_dir(self.workspace) / "branches" / f"{channel}.json"
-        agent_id = f"wf.{channel}.{self.name}"
+    def render(
+        self,
+        *,
+        workflow_run_id: str,
+        channel: str,
+        agent_id: str,
+    ) -> tuple[str, str, str | None]:
+        shared = channel_dir(self.workspace, workflow_run_id, channel)
+        manifest = branch_manifest_path(self.workspace, workflow_run_id, channel)
         variables = {
             "workspace": str(self.workspace),
+            "workflow_root": str(workflow_dir(self.workspace)),
+            "workflow_run_id": workflow_run_id,
+            "workflow_run_dir": str(workflow_run_dir(self.workspace, workflow_run_id)),
             "shared": str(shared),
             "branch_manifest": str(manifest),
             "agent": self.name,
+            "logical_agent": self.name,
             "channel": channel,
             "agent_id": agent_id,
         }
         mindset = self.mindset.format(**variables) if self.mindset is not None else None
         return self.task.format(**variables), self.acceptance.format(**variables), mindset
 
-    def materialize(self, channel: str) -> tuple[Path, Path, Path | None]:
-        task, acceptance, mindset = self.render(channel)
-        rendered = workflow_dir(self.workspace) / "rendered"
-        rendered.mkdir(parents=True, exist_ok=True)
-        stem = f"{channel}.{self.name}"
+    def materialize(
+        self,
+        *,
+        workflow_run_id: str,
+        channel: str,
+        agent_id: str,
+    ) -> tuple[Path, Path, Path | None]:
+        task, acceptance, mindset = self.render(
+            workflow_run_id=workflow_run_id,
+            channel=channel,
+            agent_id=agent_id,
+        )
+        rendered = rendered_dir(self.workspace, workflow_run_id)
+        stem = safe_file_stem(agent_id)
+
         task_path = rendered / f"{stem}.task.md"
         acceptance_path = rendered / f"{stem}.acceptance.md"
         task_path.write_text(task, encoding="utf-8")
         acceptance_path.write_text(acceptance, encoding="utf-8")
+
         mindset_path = None
         if mindset is not None:
             mindset_path = rendered / f"{stem}.mindset.md"
             mindset_path.write_text(mindset, encoding="utf-8")
+
         return task_path, acceptance_path, mindset_path
 
-    def command(self, channel: str, *, reset: bool) -> list[str]:
-        task_path, acceptance_path, mindset_path = self.materialize(channel)
+    def command(
+        self,
+        *,
+        workflow_run_id: str,
+        channel: str,
+        agent_id: str,
+    ) -> list[str]:
+        task_path, acceptance_path, mindset_path = self.materialize(
+            workflow_run_id=workflow_run_id,
+            channel=channel,
+            agent_id=agent_id,
+        )
         cmd = [
             sys.executable,
             str(self.script),
             "--workspace",
             str(self.workspace),
             "--agent-id",
-            f"wf.{channel}.{self.name}",
+            agent_id,
             "--task",
             f"@{task_path}",
             "--acceptance",
@@ -136,72 +324,48 @@ class Agent:
             cmd += ["--codex-model", self.codex_model]
         if self.codex_timeout_s != DEFAULT_CODEX_TIMEOUT_S:
             cmd += ["--codex-timeout-s", str(self.codex_timeout_s)]
-        if reset:
+        if self.reset:
+            # Usually redundant because agent_id is already fresh every time.
+            # Kept only for compatibility / manual debugging semantics.
             cmd.append("--reset")
         return cmd
 
-    def run(self, channel: str, *, first_run: bool) -> dict[str, Any]:
-        cmd = self.command(channel, reset=self.reset and first_run)
+    def run(
+        self,
+        *,
+        workflow_run_id: str,
+        channel: str,
+        agent_id: str,
+    ) -> dict[str, Any]:
+        cmd = self.command(
+            workflow_run_id=workflow_run_id,
+            channel=channel,
+            agent_id=agent_id,
+        )
         print("RUN", " ".join(cmd))
         if self.dry_run:
-            return {"returncode": 0, "decision": "accepted", "summary": "dry-run", "status": {}}
+            return {
+                "returncode": 0,
+                "decision": "accepted",
+                "summary": "dry-run",
+                "status": {},
+                "agent_id": agent_id,
+            }
+
         rc = subprocess.run(cmd, cwd=str(self.workspace)).returncode
-        status = read_status(self.workspace, f"wf.{channel}.{self.name}")
+        status = read_status(self.workspace, agent_id)
         return {
             "returncode": rc,
             "decision": status.get("decision"),
             "summary": status.get("summary"),
             "status": status,
+            "agent_id": agent_id,
         }
 
 
-def default_text(value: str | None, fallback: str) -> str:
-    text = "" if value is None else str(value).strip()
-    return text or fallback
-
-
-def workflow_dir(workspace: Path) -> Path:
-    path = workspace / ".workflow"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def channel_dir(workspace: Path, channel: str) -> Path:
-    path = workflow_dir(workspace) / "shared" / channel
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def read_status(workspace: Path, agent_id: str) -> dict[str, Any]:
-    path = workspace / ".agents" / agent_id / "state" / "ACCEPTANCE_STATUS.json"
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    except Exception:
-        return {}
-
-
-
-
-def write_branch_manifest(workspace: Path, channel: str, left: str, right: str) -> None:
-    manifest = workflow_dir(workspace) / "branches" / f"{channel}.json"
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text(
-        json.dumps(
-            {
-                "channel": channel,
-                "left_channel": left,
-                "right_channel": right,
-                "left_shared": str(channel_dir(workspace, left)),
-                "right_shared": str(channel_dir(workspace, right)),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
+# -------------------------
+# Workflow parser
+# -------------------------
 
 def tokenize(text: str) -> list[str]:
     tokens: list[str] = []
@@ -288,6 +452,10 @@ def parse(text: str) -> Any:
     return node
 
 
+# -------------------------
+# Workflow runtime
+# -------------------------
+
 def build_agent_lookup(agents: list[Agent] | tuple[Agent, ...]) -> dict[str, Agent]:
     if not agents:
         raise ValueError("agents cannot be empty")
@@ -312,45 +480,94 @@ def resolve_workspace(agents: list[Agent] | tuple[Agent, ...]) -> Path:
     return workspace
 
 
-def run_workflow(workflow: str, agents: list[Agent] | tuple[Agent, ...]) -> None:
+def run_workflow(
+    workflow: str,
+    agents: list[Agent] | tuple[Agent, ...],
+    *,
+    workflow_run_id: str | None = None,
+) -> str:
     workspace = resolve_workspace(agents)
     lookup = build_agent_lookup(agents)
-    seen: set[str] = set()
+
+    workflow_run_id = normalize_workflow_run_id(workflow_run_id)
+    invocation_counts: dict[tuple[str, str], int] = defaultdict(int)
+
+    run_meta_path = workflow_run_dir(workspace, workflow_run_id) / "RUN_META.json"
+    run_meta_path.write_text(
+        json.dumps(
+            {
+                "workflow": workflow,
+                "workflow_run_id": workflow_run_id,
+                "workspace": str(workspace),
+                "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "agents": [agent.name for agent in agents],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     def go(node: Any, channel: str) -> None:
         kind = node[0]
+
         if kind == "agent":
             name = node[1]
             agent = lookup.get(name.lower())
             if agent is None:
                 raise KeyError(f"agent not found: {name}")
-            agent_id = f"wf.{channel}.{agent.name}"
-            result = agent.run(channel, first_run=agent_id not in seen)
-            seen.add(agent_id)
+
+            key = (channel, agent.name)
+            invocation_counts[key] += 1
+            invocation_index = invocation_counts[key]
+
+            agent_id = build_execution_agent_id(
+                workflow_run_id=workflow_run_id,
+                channel=channel,
+                agent_name=agent.name,
+                invocation_index=invocation_index,
+            )
+
+            result = agent.run(
+                workflow_run_id=workflow_run_id,
+                channel=channel,
+                agent_id=agent_id,
+            )
             if result["returncode"] != 0 or result["decision"] != "accepted":
                 raise RuntimeError(
-                    f"{agent.name} failed on channel={channel}: rc={result['returncode']}, "
-                    f"decision={result['decision']}, summary={result['summary']}"
+                    f"{agent.name} failed on channel={channel}: "
+                    f"rc={result['returncode']}, "
+                    f"decision={result['decision']}, "
+                    f"summary={result['summary']}, "
+                    f"agent_id={agent_id}"
                 )
             return
+
         if kind == "seq":
             go(node[1], channel)
             go(node[2], channel)
             return
+
         if kind == "and":
             left, right = f"{channel}.left", f"{channel}.right"
             go(node[1], left)
             go(node[2], right)
-            write_branch_manifest(workspace, channel, left, right)
+            write_branch_manifest(workspace, workflow_run_id, channel, left, right)
             return
+
         if kind == "loop":
             body, rounds = node[1], int(node[2])
             if rounds <= 0:
                 raise ValueError("loop rounds must be positive")
             for index in range(rounds):
-                print(f"LOOP {index + 1}/{rounds} channel={channel}")
+                print(
+                    f"LOOP {index + 1}/{rounds} "
+                    f"channel={channel} workflow_run_id={workflow_run_id}"
+                )
                 go(body, channel)
             return
+
         raise ValueError(f"unknown workflow node: {kind}")
 
     go(parse(workflow), "main")
+    return workflow_run_id
