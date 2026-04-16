@@ -171,15 +171,6 @@ At the workflow layer, `Agent.task`, `Agent.acceptance`, and `Agent.mindset` are
 
 At the CLI layer, `agent.py` itself supports both inline text and `@path` for `--task`, `--acceptance`, and `--mindset`.
 
-## Publishing and safety
-
-Before making a public repository:
-
-- do not commit `.agents/`, `.workflow/`, or workspace output directories
-- do not commit SSH keys, host files, or remote access notes
-- do not commit API keys, tokens, or `.env` files
-- keep environment-specific paths inside local workspaces, not tracked source files
-
 ## License
 
 This repository is released under the MIT License.
