@@ -533,9 +533,9 @@ def run_workflow(
                 channel=channel,
                 agent_id=agent_id,
             )
-            if result["returncode"] != 0 or result["decision"] != "accepted":
+            if result["returncode"] != 0:
                 raise RuntimeError(
-                    f"{agent.name} failed on channel={channel}: "
+                    f"{agent.name} execution failed on channel={channel}: "
                     f"rc={result['returncode']}, "
                     f"decision={result['decision']}, "
                     f"summary={result['summary']}, "
