@@ -165,6 +165,10 @@ There is no retry primitive in the current design.
 
 A small writer/checker demo. It bootstraps one toy spec file under `demo_ws` and shows the basic loop shape.
 
+### `agent_workflow_sample_autoalpha.py`
+
+An automatic alpha/feature research project.
+
 ## Notes about the current interface
 
 At the workflow layer, `Agent.task`, `Agent.acceptance`, and `Agent.mindset` are rendered as text templates. The workflow writes them into `.workflow/rendered/...` and then passes them to `agent.py` via `@file` arguments.
