@@ -136,7 +136,10 @@ Your goals:
 - Prefer the smallest next step that is verifiable.
 - Every round should focus on which acceptance items are still missing, rather than doing vague work.
 - Important acceptance items must not rely only on memory; maintain working memory continuously through `ACCEPTANCE_STATUS.json`.
-- You may output `ACTION: FINISH` only when the acceptance gate truly passes.
+- You may output `ACTION: FINISH` only when the acceptance gate truly passes for a terminal state (`accepted` or `rejected`).
+- The only terminal decisions are `accepted` and `rejected`.
+- Requirement-level status may use `pass`, `fail`, or `unknown` while evidence is still being collected.
+- The system may run a dedicated terminalization round after `max_rounds`; keep `ACCEPTANCE_STATUS.json` and `PROGRESS.md` truthful so final verification and cleanup can close cleanly.
 - If the task cannot be completed, you may still end honestly, but `ACCEPTANCE_STATUS.json` must explain the failure evidence item by item and satisfy the gate for `rejected`.
 
 Output format (must be followed):
@@ -539,10 +542,39 @@ def parse_acceptance_items(text: str) -> List[Dict[str, str]]:
     return cleaned
 
 
+
+def normalize_terminal_decision(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    return "accepted" if value == "accepted" else "rejected"
+
+
+def normalize_requirement_status(raw: Any, evidence: str) -> str:
+    value = str(raw or "").strip().lower()
+    if value not in {"pass", "fail", "unknown"}:
+        return "unknown"
+    if value in {"pass", "fail"} and not str(evidence or "").strip():
+        return "unknown"
+    return value
+
+
+def derive_decision_from_requirements(requirements: List[Dict[str, Any]]) -> Tuple[str, Dict[str, int]]:
+    counts = {"pass": 0, "fail": 0, "unknown": 0}
+    for req in requirements:
+        status = str(req.get("status", "") or "").strip().lower()
+        if status == "pass":
+            counts["pass"] += 1
+        elif status == "fail":
+            counts["fail"] += 1
+        else:
+            counts["unknown"] += 1
+    decision = "accepted" if counts["fail"] == 0 and counts["unknown"] == 0 else "rejected"
+    return decision, counts
+
+
 def build_empty_acceptance_status(spec_hash: str, items: List[Dict[str, str]]) -> Dict[str, Any]:
     return {
         "spec_hash": spec_hash,
-        "decision": "incomplete",
+        "decision": "rejected",
         "summary": "",
         "requirements": [
             {"id": item["id"], "text": item["text"], "status": "unknown", "evidence": ""}
@@ -565,7 +597,7 @@ def normalize_existing_status(existing: Dict[str, Any], spec_hash: str, items: L
                     by_id[rid] = req
 
     normalized = build_empty_acceptance_status(spec_hash, items)
-    normalized["decision"] = str(existing.get("decision", "incomplete") or "incomplete").strip() or "incomplete"
+    normalized["decision"] = normalize_terminal_decision(existing.get("decision", "rejected"))
     normalized["summary"] = str(existing.get("summary", "") or "")
     normalized["notes"] = str(existing.get("notes", "") or "")
 
@@ -580,14 +612,19 @@ def normalize_existing_status(existing: Dict[str, Any], spec_hash: str, items: L
     new_reqs: List[Dict[str, Any]] = []
     for item in items:
         old = by_id.get(item["id"], {})
+        evidence = str(old.get("evidence", "") or "")
+        status = normalize_requirement_status(old.get("status", "unknown"), evidence)
         req = {
             "id": item["id"],
             "text": item["text"],
-            "status": str(old.get("status", "unknown") or "unknown").strip().lower() or "unknown",
-            "evidence": str(old.get("evidence", "") or ""),
+            "status": status,
+            "evidence": evidence if status in {"pass", "fail"} else "",
         }
         new_reqs.append(req)
     normalized["requirements"] = new_reqs
+
+    derived_decision, _ = derive_decision_from_requirements(new_reqs)
+    normalized["decision"] = derived_decision
     return normalized
 
 
@@ -662,6 +699,7 @@ def load_acceptance_status(paths: AgentPaths) -> Tuple[Optional[Dict[str, Any]],
     return data, ""
 
 
+
 def evaluate_acceptance_gate(paths: AgentPaths) -> Dict[str, Any]:
     items_doc, items_err = load_acceptance_items(paths)
     status_doc, status_err = load_acceptance_status(paths)
@@ -711,14 +749,6 @@ def evaluate_acceptance_gate(paths: AgentPaths) -> Dict[str, Any]:
             return result
         canonical[rid] = {"id": rid, "text": text}
 
-    decision = str(status_doc.get("decision", "") or "").strip().lower()
-    result["decision"] = decision
-    result["summary"] = str(status_doc.get("summary", "") or "").strip()
-    if decision not in {"accepted", "rejected", "incomplete"}:
-        result["reason"] = 'decision must be "accepted", "rejected", or "incomplete"'
-        result["summary"] = result["reason"]
-        return result
-
     reqs = status_doc.get("requirements")
     if not isinstance(reqs, list) or not reqs:
         result["reason"] = "requirements must be a non-empty list"
@@ -727,8 +757,6 @@ def evaluate_acceptance_gate(paths: AgentPaths) -> Dict[str, Any]:
 
     seen_ids: set[str] = set()
     normalized_items: List[Dict[str, Any]] = []
-    has_fail = False
-    has_unknown = False
 
     for idx, req in enumerate(reqs):
         if not isinstance(req, dict):
@@ -738,8 +766,8 @@ def evaluate_acceptance_gate(paths: AgentPaths) -> Dict[str, Any]:
 
         rid = str(req.get("id", "") or "").strip()
         text = str(req.get("text", "") or "").strip()
-        status = str(req.get("status", "") or "").strip().lower()
         evidence = str(req.get("evidence", "") or "").strip()
+        status = normalize_requirement_status(req.get("status", ""), evidence)
 
         if rid not in canonical:
             result["reason"] = f"requirements[{idx}].id is not defined in ACCEPTANCE_ITEMS.json: {rid}"
@@ -757,25 +785,21 @@ def evaluate_acceptance_gate(paths: AgentPaths) -> Dict[str, Any]:
             result["summary"] = result["reason"]
             return result
 
-        if status not in {"pass", "fail", "unknown"}:
-            result["reason"] = f'requirements[{idx}].status must be "pass", "fail", or "unknown"'
-            result["summary"] = result["reason"]
-            return result
-        if status in {"pass", "fail"} and not evidence:
-            result["reason"] = f"requirements[{idx}].evidence is required when status is {status}"
-            result["summary"] = result["reason"]
-            return result
-
         if status == "pass":
             result["counts"]["pass"] += 1
         elif status == "fail":
             result["counts"]["fail"] += 1
-            has_fail = True
         else:
             result["counts"]["unknown"] += 1
-            has_unknown = True
 
-        normalized_items.append({"id": rid, "text": text, "status": status, "evidence": evidence})
+        normalized_items.append(
+            {
+                "id": rid,
+                "text": text,
+                "status": status,
+                "evidence": evidence if status in {"pass", "fail"} else "",
+            }
+        )
 
     missing_ids = [rid for rid in canonical.keys() if rid not in seen_ids]
     if missing_ids:
@@ -802,33 +826,23 @@ def evaluate_acceptance_gate(paths: AgentPaths) -> Dict[str, Any]:
 
     result["items"] = normalized_items
 
-    if decision == "accepted":
-        if has_fail or has_unknown:
-            result["reason"] = 'decision=accepted requires every requirement status to be "pass"'
-            result["summary"] = result["reason"]
-            return result
-        result["ok"] = True
+    derived_decision, counts = derive_decision_from_requirements(normalized_items)
+    result["counts"] = counts
+    result["decision"] = derived_decision
+    result["summary"] = str(status_doc.get("summary", "") or "").strip()
+
+    if counts["unknown"] > 0:
+        result["reason"] = "acceptance evaluation is incomplete"
         if not result["summary"]:
-            result["summary"] = "all acceptance requirements passed"
+            result["summary"] = result["reason"]
         return result
 
-    if decision == "rejected":
-        if has_unknown:
-            result["reason"] = 'decision=rejected requires every requirement to be evaluated as "pass" or "fail"'
-            result["summary"] = result["reason"]
-            return result
-        if not has_fail:
-            result["reason"] = "decision=rejected requires at least one failed requirement"
-            result["summary"] = result["reason"]
-            return result
-        result["ok"] = True
-        if not result["summary"]:
-            result["summary"] = "task ended with unmet acceptance requirements"
-        return result
-
-    result["reason"] = "acceptance evaluation is incomplete"
+    result["ok"] = True
     if not result["summary"]:
-        result["summary"] = result["reason"]
+        if derived_decision == "accepted":
+            result["summary"] = "all acceptance requirements passed"
+        else:
+            result["summary"] = "task ended with unmet acceptance requirements"
     return result
 
 
@@ -890,13 +904,14 @@ Current agent namespace:
 You should now prioritize the following:
 1. Read the task snapshot, acceptance snapshot, `{paths.progress_path}`, and recent run logs to confirm the real state.
 2. Prioritize unfinished or failed acceptance items and obtain direct evidence.
-3. If necessary, fill in small missing changes; do not redo the entire task without bounds.
+3. If necessary, fill in small missing changes or bounded cleanup work; do not redo the entire task without bounds.
 4. Truthfully update `{paths.acceptance_status_path}`:
-   - `decision`: accepted | rejected | incomplete
+   - `decision`: accepted | rejected
    - `summary`
    - `requirements`: each item must include at least `id`, `text`, `status`, and `evidence`
    - `artifacts` / `notes` / `next_steps` are optional
-5. Update `{paths.progress_path}` and clearly state what was verified in this round and what is still missing.
+5. If the task requires temporary-file cleanup, remote cleanup, end-of-task checks, or before/after listings, do that work now and preserve the evidence.
+6. Update `{paths.progress_path}` and clearly state what was verified in this round, what was cleaned, and what is still missing.
 
 Current outstanding acceptance items:
 {render_requirement_list(state['outstanding'])}
@@ -908,6 +923,7 @@ Hard constraints:
 - Without evidence, do not mark a requirement as pass or fail.
 - Do not modify `{paths.task_source_path}`, `{paths.acceptance_source_path}`, `{paths.task_snapshot_path}`, or `{paths.acceptance_snapshot_path}` as a way to "complete the task."
 - Task-related project files may be modified anywhere in the workspace, but do not modify any files under other agent namespaces.
+- If the task requires cleanup or finalization artifacts, complete that work honestly before closing.
 - If the task is genuinely impossible to complete, you may write `rejected`, but you must explain the failure evidence item by item.
 - Do not fake `accepted`.
 
@@ -924,10 +940,154 @@ Hard constraints:
     return prompt
 
 
+def build_terminalization_prompt(*, paths: AgentPaths, max_rounds: int, reason: str = "") -> str:
+    state = acceptance_status_for_prompt(paths)
+    task_text = paths.task_snapshot_path.read_text(encoding="utf-8", errors="replace").strip()
+    acceptance_text = paths.acceptance_snapshot_path.read_text(encoding="utf-8", errors="replace").strip()
+
+    reason = (reason or "").strip()
+    reason_line = reason if reason else "acceptance gate not yet satisfied"
+
+    return f"""Perform the terminalization round now.
+
+Normal exploration rounds are exhausted:
+- max_rounds: {max_rounds}
+- last gate reason: {reason_line}
+
+This round has one purpose: finish honest closure work. Do not explore new speculative directions.
+
+Terminalization objectives:
+1. Read the task snapshot, acceptance snapshot, `{paths.progress_path}`, recent run logs, and any produced artifacts to confirm the real final state.
+2. Execute any mandatory end-of-task cleanup required by the task, including temporary files, debug output, caches, remote temporary files, or final check files created by this invocation.
+3. If the task asks for cleanup evidence such as before/after listings, preserve that evidence under `{paths.runs_dir}`.
+4. Close every acceptance requirement to either `pass` or `fail` with direct evidence. Leave no `unknown` requirement.
+5. Set `{paths.acceptance_status_path}` to a truthful terminal state:
+   - `decision`: accepted | rejected
+   - `summary`: concise final outcome
+   - `requirements[*]`: id, text, status, evidence
+   - `artifacts`, `notes`, `next_steps`: optional but useful
+6. Update `{paths.progress_path}` with what was verified, what was cleaned, and why the final decision is accepted or rejected.
+
+Current outstanding acceptance items:
+{render_requirement_list(state['outstanding'])}
+
+Current failed acceptance items:
+{render_requirement_list(state['failed'], include_evidence=True)}
+
+Hard constraints:
+- This is a bounded final verification and cleanup round, not a fresh open-ended research round.
+- Without direct evidence, write `fail`, not `pass`.
+- Do not modify `{paths.task_source_path}`, `{paths.acceptance_source_path}`, `{paths.task_snapshot_path}`, or `{paths.acceptance_snapshot_path}` as a way to finish.
+- If cleanup is required by the task, complete it honestly or record the cleanup failure explicitly and finish as `rejected`.
+- If the task requires final artifacts such as finish-check files, inventory listings, or summaries, write them truthfully now.
+- End this round with a valid terminal state that can be audited from disk.
+
+## TASK SNAPSHOT
+{task_text}
+
+## ACCEPTANCE SNAPSHOT
+{acceptance_text}
+
+Execute now. Do not respond with only a plan.
+"""
+
+
+def force_close_after_terminalization(paths: AgentPaths, *, reason: str = "") -> Dict[str, Any]:
+    items_doc, items_err = load_acceptance_items(paths)
+    if items_doc is None:
+        raise ValueError(items_err)
+
+    items_raw = items_doc.get("items") or []
+    items: List[Dict[str, str]] = []
+    for idx, item in enumerate(items_raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"items[{idx}] must be an object")
+        rid = str(item.get("id", "") or "").strip()
+        text = str(item.get("text", "") or "").strip()
+        if not rid or not text:
+            raise ValueError(f"items[{idx}] must contain id and text")
+        items.append({"id": rid, "text": text})
+
+    spec_hash = str(items_doc.get("spec_hash", "") or "").strip()
+    existing, _ = load_acceptance_status(paths)
+    normalized = normalize_existing_status(existing or {}, spec_hash, items)
+
+    dropped_artifacts: List[str] = []
+    kept_artifacts: List[str] = []
+    for raw in normalized.get("artifacts") or []:
+        path = resolve_artifact_path(paths, raw)
+        if path is not None and path.exists():
+            kept_artifacts.append(str(raw))
+        else:
+            dropped_artifacts.append(str(raw))
+    normalized["artifacts"] = kept_artifacts
+
+    unresolved_ids: List[str] = []
+    for req in normalized["requirements"]:
+        status = str(req.get("status", "") or "").strip().lower()
+        evidence = str(req.get("evidence", "") or "").strip()
+        if status == "pass" and evidence:
+            continue
+        if status == "fail" and evidence:
+            continue
+
+        unresolved_ids.append(str(req.get("id", "") or "").strip())
+        req["status"] = "fail"
+        if status == "pass" and not evidence:
+            req["evidence"] = (
+                "Terminalization left this item marked pass without direct evidence; "
+                "closed as fail in the terminal bookkeeping fallback."
+            )
+        elif status == "fail" and not evidence:
+            req["evidence"] = (
+                "Terminalization indicated failure without direct evidence; "
+                "closed as fail in the terminal bookkeeping fallback."
+            )
+        else:
+            req["evidence"] = (
+                "Terminalization did not establish direct evidence for this requirement; "
+                "closed as fail in the terminal bookkeeping fallback."
+            )
+
+    derived_decision, _ = derive_decision_from_requirements(normalized["requirements"])
+    normalized["decision"] = derived_decision
+
+    fail_ids = [req["id"] for req in normalized["requirements"] if req.get("status") == "fail"]
+    if derived_decision == "accepted":
+        normalized["summary"] = "all acceptance requirements passed"
+    else:
+        fail_part = ", ".join(fail_ids) if fail_ids else "(none)"
+        normalized["summary"] = (
+            "Terminalization completed without a full pass; closed as rejected. "
+            f"Failed requirements: {fail_part}."
+        )
+
+    note_parts: List[str] = []
+    existing_notes = str(normalized.get("notes", "") or "").strip()
+    if existing_notes:
+        note_parts.append(existing_notes)
+    if reason:
+        note_parts.append(reason)
+    if unresolved_ids:
+        note_parts.append(
+            "Terminal bookkeeping fallback converted unresolved requirements to fail: "
+            + ", ".join(unresolved_ids)
+        )
+    if dropped_artifacts:
+        note_parts.append(
+            "Dropped non-existent artifacts during terminal bookkeeping fallback: "
+            + ", ".join(dropped_artifacts)
+        )
+    normalized["notes"] = "\n".join(note_parts).strip()
+
+    write_json(paths.acceptance_status_path, normalized)
+    return normalized
+
+
 def synthesize_final_message(paths: AgentPaths) -> str:
     gate = evaluate_acceptance_gate(paths)
     data = gate.get("data") or {}
-    decision = str(data.get("decision", "") or "").strip().lower()
+    decision = str(gate.get("decision") or data.get("decision", "") or "").strip().lower()
     summary = str(data.get("summary", "") or "").strip()
     items = gate.get("items") or []
     artifacts = data.get("artifacts") or []
@@ -1529,22 +1689,73 @@ def main() -> int:
             history.append({"role": "CODEX_RESULT", "content": f"ERROR: {e}"})
             continue
 
+
     refresh_truth()
     gate = evaluate_acceptance_gate(paths)
     if gate["ok"]:
-        append_progress(paths, f"[System] Reached max_rounds={args.max_rounds} with a passing acceptance gate")
+        append_progress(paths, f"[System] Reached max_rounds={args.max_rounds} with a terminal acceptance state")
         print(synthesize_final_message(paths))
         return 0
 
     append_progress(
         paths,
-        f"[System] Reached max_rounds={args.max_rounds}; last gate reason: {gate['reason'] or gate['summary']}",
+        f"[System] Reached max_rounds={args.max_rounds}; entering terminalization round. Last gate reason: {gate['reason'] or gate['summary']}",
     )
-    print(f"Stopped: reached max_rounds={args.max_rounds}.")
+
+    terminal_dir = paths.runs_dir / f"round_{int(args.max_rounds):02d}_terminalization"
+    terminal_prompt = build_terminalization_prompt(
+        paths=paths,
+        max_rounds=int(args.max_rounds),
+        reason=gate["reason"] or gate["summary"],
+    )
+
+    try:
+        terminal_res = run_codex_round(terminal_dir, terminal_prompt)
+        append_progress(
+            paths,
+            f"[System] Terminalization round completed (codex_returncode={terminal_res['returncode']})",
+        )
+    except Exception as e:
+        append_progress(paths, f"[System] Terminalization round failed to execute: {e}")
+        history.append({"role": "SYSTEM", "content": f"Terminalization round execution error: {e}"})
+
+    refresh_truth()
+    gate = evaluate_acceptance_gate(paths)
+    if gate["ok"]:
+        append_progress(paths, f"[System] Terminalization produced terminal acceptance state decision={gate['decision']}")
+        print(synthesize_final_message(paths))
+        return 0
+
+    append_progress(
+        paths,
+        f"[System] Terminalization did not fully close the gate; applying terminal bookkeeping fallback. Last gate reason: {gate['reason'] or gate['summary']}",
+    )
+    try:
+        force_close_after_terminalization(
+            paths,
+            reason=gate["reason"] or gate["summary"],
+        )
+        refresh_truth()
+        gate = evaluate_acceptance_gate(paths)
+    except Exception as e:
+        append_progress(paths, f"[System] Terminal bookkeeping fallback failed: {e}")
+        print(f"Terminal bookkeeping fallback error: {e}", file=sys.stderr)
+        return 3
+
+    if gate["ok"]:
+        append_progress(paths, f"[System] Terminal bookkeeping fallback completed with decision={gate['decision']}")
+        print(synthesize_final_message(paths))
+        return 0
+
+    append_progress(
+        paths,
+        f"[System] Terminalization and terminal bookkeeping fallback still did not produce a terminal acceptance state: {gate['reason'] or gate['summary']}",
+    )
+    print("Terminalization could not produce a valid terminal acceptance state.", file=sys.stderr)
     if gate["reason"]:
-        print(f"Acceptance gate reason: {gate['reason']}")
-    print(f"Check {paths.acceptance_status_path} and {paths.runs_dir} for evidence.")
-    return 1
+        print(f"Acceptance gate reason: {gate['reason']}", file=sys.stderr)
+    print(f"Check {paths.acceptance_status_path} and {paths.runs_dir} for evidence.", file=sys.stderr)
+    return 3
 
 
 if __name__ == "__main__":
